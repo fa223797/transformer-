@@ -14,17 +14,17 @@ from torch.autograd import Variable
 
 Hypothesis = namedtuple('Hypothesis', ['value', 'score'])
 
-
+#一、编码器的制作：
 def clones(module, n):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(n)])
 
-
+#第一层layernorm残差连接
 class LayerNorm(nn.Module):
 
     def __init__(self, feature, eps=1e-6):
         """
         :param feature: self-attention 的 x 的大小
-        :param eps:
+        :param eps: 一个很小的正数,用于数值稳定性,默认值为1e-6
         """
         super(LayerNorm, self).__init__()
         self.a_2 = nn.Parameter(torch.ones(feature))
@@ -35,12 +35,14 @@ class LayerNorm(nn.Module):
         mean = x.mean(-1, keepdim=True)
         std = x.std(-1, keepdim=True)
         return self.a_2 * (x - mean) / (std + self.eps) + self.b_2
+        #残差公式y=（（x-均值）/求方差+偏置（避免分母为0）*权重+偏置（二者均可学习随着训练过程而变化）
 
 
 
-
+#残差+标准化
 class SublayerConnection(nn.Module):
     """
+    layernorm残差连接
     这不仅仅做了残差，这是把残差和 layernorm 一起给做了
 
     """
@@ -48,13 +50,13 @@ class SublayerConnection(nn.Module):
         super(SublayerConnection, self).__init__()
         # 第一步做 layernorm
         self.layer_norm = LayerNorm(size)
-        # 第二步做 dropout
+        # 第二步做 dropout随机去掉10%的参数避免过度拟合，提升泛化能力和性能，上面关注0.1
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, sublayer):
         """
-        :param x: 就是self-attention的输入
-        :param sublayer: self-attention层
+        :param x: self-attention的输入x
+        :param sublayer: self-attention层之后的结果
         :return:
         """
         return self.dropout(self.layer_norm(x + sublayer(x)))
@@ -90,6 +92,11 @@ class PositionalEncoding(nn.Module):
         if dim % 2 != 0:
             raise ValueError("Cannot use sin/cos positional encoding with "
                              "odd dim (got dim={:d})".format(dim))
+        """
+        构建位置编码pe
+        pe公式为：
+        PE(pos,2i/2i+1) = sin/cos(pos/10000^{2i/d_{model}})
+        """
         pe = torch.zeros(max_len, dim)
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp((torch.arange(0, dim, 2, dtype=torch.float) *
@@ -112,18 +119,19 @@ class PositionalEncoding(nn.Module):
         emb = self.drop_out(emb)
         return emb
 
-
+#自注意力机制  QKV
 def self_attention(query, key, value, dropout=None, mask=None):
     d_k = query.size(-1)
-    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)#QK相乘除以根号dk
     # mask的操作在QK之后，softmax之前
     if mask is not None:
-        mask.cuda()
+        mask.cuda()#掩码注意力机制（解码的时候用）
         scores = scores.masked_fill(mask == 0, -1e9)
-    self_attn = F.softmax(scores, dim=-1)
+    self_attn = F.softmax(scores, dim=-1)#注意力的概率
     if dropout is not None:
         self_attn = dropout(self_attn)
-    return torch.matmul(self_attn, value), self_attn
+        #dropout随机去掉10%的参数避免过度拟合，提升泛化能力和性能，上面关注0.1，丢掉注意力机制的拟合
+    return torch.matmul(self_attn, value), self_attn#Q*K*V注意力值
 
 
 class MultiHeadAttention(nn.Module):
@@ -131,15 +139,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, head, d_model, dropout=0.1):
         super(MultiHeadAttention, self).__init__()
         assert (d_model % head == 0)
-        self.d_k = d_model // head
-        self.head = head
-        self.d_model = d_model
-        self.linear_query = nn.Linear(d_model, d_model)
-        self.linear_key = nn.Linear(d_model, d_model)
-        self.linear_value = nn.Linear(d_model, d_model)
-        self.linear_out = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(p=dropout)
-        self.attn = None
+        self.d_k = d_model // head#dk
+        self.head = head#头数，默认8
+        self.d_model = d_model#模型维度，默认512
+        self.linear_query = nn.Linear(d_model, d_model)#线性变换层 Q
+        self.linear_key = nn.Linear(d_model, d_model)#线性变换层 K
+        self.linear_value = nn.Linear(d_model, d_model)#线性变换层 V
+        self.linear_out = nn.Linear(d_model, d_model)#线性变换层 输出
+        self.dropout = nn.Dropout(p=dropout)#避免过拟合
+        self.attn = None#注意力机制的值
 
     def forward(self, query, key, value, mask=None):
         if mask is not None:
@@ -153,12 +161,12 @@ class MultiHeadAttention(nn.Module):
         #     query = self.linear_query(query).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 32, 64]
         #     key = self.linear_key(key).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 28, 64]
         #     value = self.linear_value(value).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 28, 64]
-        #
+        
         #     x, self.attn = self_attention(query, key, value, dropout=self.dropout, mask=mask)
         #     # 变为三维， 或者说是concat head
         #     x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.head * self.d_k)
 
-        query = self.linear_query(query).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 32, 64]
+        query = self.linear_query(query).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 32, 64]，理论是视频32帧，也可以理解一句话32个单词
         key = self.linear_key(key).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 28, 64]
         value = self.linear_value(value).view(n_batch, -1, self.head, self.d_k).transpose(1, 2)  # [b, 8, 28, 64]
 
